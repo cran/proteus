@@ -1,0 +1,10 @@
+eda0bbf4a911b09529e79f52014a7f72 *DESCRIPTION
+edba7462e1ef2670ccccd8bc0cb3c97e *NAMESPACE
+3966c1b6b8dc6fde544f6faef434063f *NEWS.md
+b93b059628f84660cd4b026d40c6b622 *R/data.R
+3862a9cb4fb5d33f4c832d72e7f3084f *R/main.R
+6f78cc6083a0a0135e1f521087820ba8 *R/proteus.R
+58b85033a4afbd7d0deb905d21bd6cf7 *R/support.R
+65dad0e6f9533a1dbee03248f8fa974c *data/amzn_aapl_fb.rda
+4a6b574aa10523aaa426c80453e1fb79 *man/amzn_aapl_fb.Rd
+114e4094fab4e67ef0fadc492b914cda *man/proteus.Rd
