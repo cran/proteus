@@ -1,44 +1,281 @@
-#' support functions for proteus
+#' proteus
+#'
+#' @description Proteus is a Sequence-to-Sequence Variational Model designed for time-feature analysis, leveraging a wide range of distributions for improved accuracy. Unlike traditional methods that rely solely on the normal distribution, Proteus uses various latent models to better capture and predict complex processes. To achieve this, Proteus employs a neural network architecture that estimates the shape, location, and scale parameters of the chosen distribution. This approach transforms past sequence data into future sequence parameters, improving the model's prediction capabilities. Proteus also assesses the accuracy of its predictions by estimating the error of measurement and calculating the confidence interval. By utilizing a range of distributions and advanced modeling techniques, Proteus provides a more accurate and comprehensive approach to time-feature analysis.
+#'
+#' @param data A data frame with time features on columns and possibly a date column (not mandatory)
+#' @param target Vector of strings. Names of the time features to be jointly analyzed
+#' @param future Positive integer. The future dimension with number of time-steps to be predicted
+#' @param past Positive integer. Length of past sequences
+#' @param ci Positive numeric. Confidence interval. Default: 0.8
+#' @param smoother Logical. Perform optimal smoothing using standard loess for each time feature. Default: FALSE
+#' @param t_embed Positive integer. Number of embedding for the temporal dimension. Minimum value is equal to 2. Default: 30.
+#' @param activ String. Activation function to be used by the forward network. Implemented functions are: "linear", "mish", "swish", "leaky_relu", "celu", "elu", "gelu", "selu", "bent", "softmax", "softmin", "softsign", "softplus", "sigmoid", "tanh". Default: "linear".
+#' @param nodes Positive integer. Nodes for the forward neural net. Default: 32.
+#' @param distr String. Distribution to be used by variational model. Implemented distributions are: "normal", "genbeta", "gev", "gpd", "genray", "cauchy", "exp", "logis", "chisq", "gumbel", "laplace", "lognorm". Default: "normal".
+#' @param optim String. Optimization method. Implemented methods are: "adadelta", "adagrad", "rmsprop", "rprop", "sgd", "asgd", "adam".
+#' @param loss_metric String. Loss function for the variational model. Three options: "elbo", "crps", "score". Default: "crps".
+#' @param epochs Positive integer. Default: 30.
+#' @param lr Positive numeric. Learning rate. Default: 0.01.
+#' @param patience Positive integer. Waiting time (in epochs) before evaluating the overfit performance. Default: epochs.
+#' @param latent_sample Positive integer. Number of samples to draw from the latent variables. Default: 100.
+#' @param verbose Logical. Default: TRUE
+#' @param stride Positive integer. Number of shifting positions for sequence generation. Default: 1.
+#' @param dates String. Label of feature where dates are located. Default: NULL (progressive numbering).
+#' @param rolling_blocks Logical. Option for incremental or rolling window. Default: FALSE.
+#' @param n_blocks Positive integer. Number of distinct blocks for back-testing. Default: 4.
+#' @param block_minset Positive integer. Minimum number of sequence to create a block. Default: 3.
+#' @param error_scale String. Scale for the scaled error metrics. Two options: "naive" (average of naive one-step absolute error for the historical series) or "deviation" (standard error of the historical series). Default: "naive".
+#' @param error_benchmark String. Benchmark for the relative error metrics. Two options: "naive" (sequential extension of last value) or "average" (mean value of true sequence). Default: "naive".
+#' @param batch_size Positive integer. Default: 30.
+#' @param omit Logical. Flag to TRUE to remove missing values, otherwise all gaps, both in dates and values, will be filled with kalman filter. Default: FALSE.
+#' @param seed Random seed. Default: 42.
 #'
 #' @author Giancarlo Vercellino \email{giancarlo.vercellino@gmail.com}
 #'
+#'
+#'@return This function returns a list including:
+#' \itemize{
+#'\item model_descr: brief model description (number of tensors and parameters)
+#'\item prediction: a table with quantile predictions, mean, std, mode, skewness and kurtosis for each time feature (and other metrics, such as iqr_to_range, above_to_below_range, upside_prob, divergence).
+#'\item plot: graph with history and prediction for each time feature
+#'\item feature_errors: train and test error for each time feature (me, mae, mse, rmsse, mpe, mape, rmae, rrmse, rame, mase, smse, sce)
+#'\item history: average cross-validation loss across blocks
+#'\item time_log: computation time.
+#' }
+#'
+#'
+#' @export
+#'
+#' @importFrom fANCOVA loess.as
+#' @importFrom imputeTS na_kalman
 #' @import purrr
+#' @import dplyr
 #' @import abind
 #' @import torch
 #' @import ggplot2
 #' @import tictoc
-#' @import readr
+#' @importFrom readr parse_number
 #' @import stringr
-#' @import lubridate
+#' @importFrom lubridate seconds_to_period as_date is.Date
 #' @importFrom scales number
 #' @importFrom narray split
-#' @importFrom stats lm median na.omit quantile density rcauchy rchisq rexp rlnorm rlogis rnorm dcauchy dchisq dexp dlnorm dlogis dnorm pcauchy pchisq pexp plnorm plogis pnorm runif sd var
-#' @importFrom utils head tail
+#' @importFrom utils head tail combn
+#' @import torch
+#' @importFrom stats ecdf lm median na.omit quantile density rcauchy rchisq rexp rlnorm rlogis rnorm dcauchy dchisq dexp dlnorm dlogis dnorm pcauchy pchisq pexp plnorm plogis pnorm runif sd var
 #' @importFrom VGAM rgev pgev dgev rgpd pgpd dgpd rlaplace plaplace dlaplace rgenray pgenray dgenray rgumbel dgumbel pgumbel
 #' @importFrom actuar rgenbeta pgenbeta dgenbeta
-#' @importFrom modeest mlv1
+#' @importFrom modeest mlv1 mfv1
 #' @importFrom moments skewness kurtosis
-##@importFrom torch nn_module
+#' @importFrom greybox ME MAE MSE RMSSE MRE MPE MAPE rMAE rRMSE rAME MASE sMSE sCE
+#' @importFrom ggthemes theme_clean
+#'
+#' @references https://rpubs.com/giancarlo_vercellino/proteus
+#'
+proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
+                    t_embed = 30, activ = "linear", nodes = 32, distr = "normal", optim = "adam",
+                    loss_metric = "crps", epochs = 30, lr = 0.01, patience = 10, latent_sample = 100, verbose = TRUE,
+                    stride = 1, dates = NULL, rolling_blocks = FALSE, n_blocks = 4, block_minset = 30,
+                    error_scale = "naive", error_benchmark = "naive", batch_size = 30, omit = FALSE, seed = 42)
+{
 
+  tic.clearlog()
+  tic("proteus")
 
-###SUPPORT
+  ###PRECHECK
+  if(cuda_is_available()){dev <- "cuda"} else {dev <- "cpu"}
+  deriv <- map_dbl(data[, target, drop = FALSE], ~ best_deriv(.x))
 
-globalVariables(c("train_loss", "val_loss", "x_all", "y_all", "pgenray", "pgumbel", "plaplace", "dgenray", "dgumbel", "dlaplace", "dev"))
+  if(max(deriv) >= future | max(deriv) >= past){stop("deriv cannot be equal or greater than future and/or past")}
+  if(future <= 0 | past <= 0){stop("past and future must be strictly positive integers")}
+  if(t_embed < 2){t_embed <- 2; if(verbose == TRUE){cat("setting t_embed to the minimum possible value (2)\n")}}
+  if(n_blocks < 3){n_blocks <- 3; if(verbose == TRUE){cat("setting n_blocks to the minimum possible value (3)\n")}}
 
+  ####PREPARATION & MISSING IMPUTATION
+  set.seed(seed)
+  torch_manual_seed(seed)
+
+  data <- gap_fixer(data, dates, verbose, omit)
+  if(is.null(dates)){time_unit <- NULL} else {time_unit <- units(diff.Date(data[[dates]]))}
+  if(is.null(dates)) {date_vector <- NULL} else {date_vector <- data[[dates]]}
+
+  data <- data[, target, drop = FALSE]
+  n_feat <- ncol(data)
+  n_length <- nrow(data)
+
+  ###SMOOTHING
+  if(smoother==TRUE){data <- as.data.frame(map(data, ~ loess.as(x=1:n_length, y=.x)$fitted)); if(verbose == TRUE){cat("performing optimal smoothing\n")}}
+
+  ###SEGMENTATION
+  block_model <- block_sampler(data, seq_len = past + future, n_blocks, block_minset, stride)
+  block_set <- block_model$block_set
+  block_index <- block_model$block_index
+  feature_block <- 1:past
+  target_block <- (past - max(deriv) + 1):(past + future)
+
+  train_history_list <- vector("list", n_blocks-1)
+  test_history_list <- vector("list", n_blocks-1)
+  block_features_errors <- vector("list", n_blocks-1)
+  block_learning_errors <- vector("list", n_blocks-1)
+  block_raw_errors <- vector("list", n_blocks-1)
+
+  for(n in 1:(n_blocks-1))
+  {
+    if(verbose == TRUE){cat("\nblock", n,"\n")}
+    if(rolling_blocks == FALSE){train_reframed <- abind(block_set[1:n], along = 1)}
+    if(rolling_blocks == TRUE){train_reframed <- abind(block_set[n], along = 1)}
+    if(verbose == TRUE){cat(nrow(train_reframed), "sequence for training\n")}
+
+    x_train <- train_reframed[,feature_block,,drop=FALSE]
+    y_train <- train_reframed[,target_block,,drop=FALSE]
+
+    test_reframed <- abind(block_set[n+1], along = 1)
+    if(verbose == TRUE){cat(nrow(test_reframed), "sequence for testing\n")}
+
+    x_test <- test_reframed[,feature_block,,drop=FALSE]
+    y_test <- test_reframed[,target_block,,drop=FALSE]
+
+    new_data <- tail(data, past)
+    new_reframed <- block_reframer(new_data, past, stride)
+
+    ###DERIVATIVE
+    x_train_deriv_model <- reframed_multiple_differentiation(x_train, deriv)
+    x_train <- x_train_deriv_model$reframed
+    y_train_deriv_model <- reframed_multiple_differentiation(y_train, deriv)
+    y_train <- y_train_deriv_model$reframed
+
+    x_test_deriv_model <- reframed_multiple_differentiation(x_test, deriv)
+    x_test <- x_test_deriv_model$reframed
+    y_test_deriv_model <- reframed_multiple_differentiation(y_test, deriv)
+    y_test <- y_test_deriv_model$reframed
+
+    ###TRAINING MODEL
+    model <- nn_variational_model(target_len = future, seq_len = past - max(deriv), n_feat = n_feat, t_embed = t_embed, activ = activ, nodes = nodes, dev = dev, distr = distr)
+    training <- training_function(model, x_train, y_train, x_test, y_test, loss_metric, optim, lr, epochs, patience, verbose, batch_size, distr, dev)
+    train_history <- training$train_history
+    test_history <- training$test_history
+    model <- training$model
+
+    pred_train <- pred_fun(model, x_train, "mean", n_sample = latent_sample, dev=dev)
+    pred_test <- pred_fun(model, x_test, "mean", n_sample = latent_sample, dev=dev)
+
+    ###INTEGRATION
+    pred_train <- reframed_multiple_integration(pred_train, x_train_deriv_model$dmodels, pred = TRUE)
+    pred_test <- reframed_multiple_integration(pred_test, x_test_deriv_model$dmodels, pred = TRUE)
+
+    ###ERRORS
+    predict_block <- (past + 1):(past + future)
+    train_true <- train_reframed[,predict_block,,drop=FALSE]
+    train_errors <- pmap(list(smart_split(train_true, along = 3), smart_split(pred_train, along = 3), data), ~ custom_metrics(..1, ..2, actuals = ..3[block_index == n], error_scale, error_benchmark))
+
+    predict_block <- (past + 1):(past + future)
+    test_true <- test_reframed[,predict_block,,drop=FALSE]
+    test_errors <- pmap(list(smart_split(test_true, along = 3), smart_split(pred_test, along = 3), data), ~ custom_metrics(..1, ..2, actuals = ..3[block_index == n], error_scale, error_benchmark))
+
+    block_raw_errors[[n]] <- aperm(apply(test_true - pred_test, c(1, 2, 3), mean, na.rm=TRUE), c(2, 1, 3))
+
+    features_errors <- transpose(list(train_errors, test_errors))
+    features_errors <- map(features_errors, ~ Reduce(rbind, .x))
+    features_errors <- map(features_errors, ~ {rownames(.x) <- c("train", "test"); return(.x)})
+    names(features_errors) <- target
+
+    train_history_list[[n]] <- training$train_history
+    test_history_list[[n]] <- training$test_history
+
+    block_features_errors[[n]] <- features_errors
+  }
+
+  features_errors <- map(transpose(block_features_errors), ~ Reduce('+', .x)/(n_blocks-1))
+  raw_errors <- aperm(abind(block_raw_errors, along = 2), c(2, 1, 3))
+
+  ###FINAL MODEL
+  if(verbose == TRUE){cat("\nfinal training on all", n_blocks,"\n")}
+  train_reframed <- abind(block_set[1:n_blocks], along = 1)
+  if(verbose == TRUE){cat(nrow(train_reframed), "sequence for training\n")}
+
+  x_train <- train_reframed[,feature_block,,drop=FALSE]
+  y_train <- train_reframed[,target_block,,drop=FALSE]
+
+  x_train_deriv_model <- reframed_multiple_differentiation(x_train, deriv)
+  x_train <- x_train_deriv_model$reframed
+  y_train_deriv_model <- reframed_multiple_differentiation(y_train, deriv)
+  y_train <- y_train_deriv_model$reframed
+
+  new_data_deriv_model <- reframed_multiple_differentiation(new_reframed, deriv)
+  new_reframed <- new_data_deriv_model$reframed
+
+  model <- nn_variational_model(target_len = future, seq_len = past - max(deriv), n_feat = n_feat, t_embed = t_embed, activ = activ, nodes = nodes, dev = dev, distr = distr)
+  training <- training_function(model, x_train, y_train, x_test = NULL, y_test = NULL, loss_metric, optim, lr, epochs, patience, verbose, batch_size, distr, dev)
+  train_history <- training$train_history
+  model <- training$model
+
+  ###LOSS PLOT
+  len <- map_dbl(train_history_list, ~length(.x))
+  extend <- max(len) - len
+  cv_train_history <- colMeans(Reduce(rbind, map2(train_history_list, extend, ~ c(.x, rep(smart_tail(.x, 1), .y)))))
+
+  len <- map_dbl(test_history_list, ~length(.x))
+  extend <- max(len) - len
+  cv_test_history <- colMeans(Reduce(rbind, map2(test_history_list, extend, ~c(.x, rep(smart_tail(.x, 1), .y)))))
+
+  act_epochs <- min(c(length(cv_train_history), length(cv_test_history)))
+  x_ref_point <- c(quantile(1:act_epochs, 0.15), quantile(1:act_epochs, 0.75))
+  y_ref_point <- c(quantile(cv_test_history, 0.75), quantile(cv_train_history, 0.15))
+
+  train_data <- data.frame(epochs = 1:act_epochs, cv_train_history = cv_train_history[1:act_epochs])
+
+  history <- ggplot(train_data) +
+    geom_point(aes(x = epochs, y = cv_train_history), col = "blue", shape = 1, size = 1) +
+    geom_smooth(col="darkblue", aes(x = epochs, y = cv_train_history), se=FALSE, method = "loess")
+
+  val_data <- data.frame(epochs = 1:act_epochs, cv_test_history = cv_test_history[1:act_epochs])
+
+  history <- history + geom_point(aes(x = epochs, y = cv_test_history), val_data, col = "orange", shape = 1, size = 1) +
+    geom_smooth(aes(x = epochs, y = cv_test_history), val_data, col="darkorange", se=FALSE, method = "loess")
+
+  history <- history + ylab("Loss") + xlab("Epochs") +
+    annotate("text", x = x_ref_point[1], y = y_ref_point[1], label = "TESTING ERROR", col = "darkorange", hjust = 0, vjust= 0) + ###SINCE THIS IS THE FINAL SET, WE ARE TESTING
+    annotate("text", x = x_ref_point[2], y = y_ref_point[2], label = "TRAINING ERROR", col = "darkblue", hjust = 0, vjust= 0) +
+    theme_clean() +
+    ylab(paste0("average cv error (", loss_metric, ")"))
+
+  ###NEW PREDICTION
+  pred_new <- replicate(dim(raw_errors)[1], pred_fun(model, new_reframed, "sample", n_sample = latent_sample, dev=dev), simplify = FALSE)
+  pred_new <- map(pred_new, ~ reframed_multiple_integration(.x, new_data_deriv_model$dmodels, pred = TRUE))###UNLIST NEEDED ONLY HERE
+
+  integrated_pred <- abind(pred_new, along=1) + raw_errors
+  prediction <- map2(smart_split(integrated_pred, along = 3), data, ~ qpred(.x, ts = .y, ci, error_scale, error_benchmark))
+  prediction <- map(prediction, ~{rownames(.x) <- paste0("t", 1:future); return(.x)})
+  names(prediction) <- target
+
+  if(!is.null(date_vector))
+  {
+    start <- as.Date(tail(date_vector, 1))
+    new_dates<- seq.Date(from = start, length.out = future, by = time_unit)
+    prediction <- map(prediction, ~{rownames(.x) <- as.character(new_dates); return(.x)})
+  }
+
+  plot <- pmap(list(data, prediction, target), ~ plotter(quant_pred = ..2, ci, ts = ..1, dates = date_vector, time_unit, feat_name = ..3))
+
+  n_tensors <- length(model$parameters)
+  n_parameters <- sum(map_dbl(model$parameters, ~ length(as.vector(as_array(.x)))))
+  if(verbose==TRUE){cat("\nvariational model based on", distr, "latent distribution with", n_tensors, "tensors and", n_parameters, "parameters\n")}
+  model_descr <- paste0("variational model based on ", distr, " latent distribution with ", n_tensors, " tensors and ", n_parameters, " parameters")
+
+  toc(log = TRUE)
+  time_log<-seconds_to_period(round(parse_number(unlist(tic.log())), 0))
+
+  ###OUTCOMES
+  outcome <- list(model_descr = model_descr, prediction = prediction, plot = plot, features_errors = features_errors, history = history, time_log = time_log)
+
+  return(outcome)
+
+}
+
+###SUPPORT FUNCTIONS
 nn_mish <- nn_module(
   "nn_mish",
-  initialize = function(beta = 1) {self$softplus <- nn_softplus(beta = beta)},
+  initialize = function() {self$softplus <- nn_softplus(beta = 1)},
   forward = function(x) {x * torch_tanh(self$softplus(x))})
-
-nn_fts <- nn_module(
-  "nn_fts",
-  initialize = function(T = - 0.001) {self$T <- nn_buffer(T)},
-  forward = function(x) {nnf_leaky_relu(x) * torch_sigmoid(x) + T})
-
-nn_snake <- nn_module(
-  "nn_snake",
-  initialize = function(a = 0.5) {self$a <- nn_buffer(a)},
-  forward = function(x) {x + torch_square(torch_sin(self$a*x)/self$a)})
 
 nn_bent <- nn_module(
   "nn_bent",
@@ -52,31 +289,27 @@ nn_swish <- nn_module(
 
 nn_activ <- nn_module(
   "nn_activ",
-  initialize = function(act, dim = 2, alpha = 1, beta = 1, lambda = 0.5, min_val = -1, max_val = 1, a = 0.5)
+  initialize = function(act, dim = 2)
   {
     if(act == "linear"){self$activ <- nn_identity()}
-    if(act == "mish"){self$activ <- nn_mish(beta)}
+    if(act == "mish"){self$activ <- nn_mish()}
     if(act == "leaky_relu"){self$activ <- nn_leaky_relu()}
-    if(act == "celu"){self$activ <- nn_celu(alpha)}
-    if(act == "elu"){self$activ <- nn_elu(alpha)}
+    if(act == "celu"){self$activ <- nn_celu()}
+    if(act == "elu"){self$activ <- nn_elu()}
     if(act == "gelu"){self$activ <- nn_gelu()}
     if(act == "selu"){self$activ <- nn_selu()}
-    if(act == "softplus"){self$activ <- nn_softplus(beta)}
+    if(act == "softplus"){self$activ <- nn_softplus()}
     if(act == "bent"){self$activ <- nn_bent()}
-    if(act == "snake"){self$activ <- nn_snake(a)}
     if(act == "softmax"){self$activ <- nn_softmax(dim)}
     if(act == "softmin"){self$activ <- nn_softmin(dim)}
     if(act == "softsign"){self$activ <- nn_softsign()}
     if(act == "sigmoid"){self$activ <- nn_sigmoid()}
     if(act == "tanh"){self$activ <- nn_tanh()}
-    if(act == "hardsigmoid"){self$activ <- nn_hardsigmoid()}
     if(act == "swish"){self$activ <- nn_swish()}
-    if(act == "fts"){self$activ <- nn_fts()}
-    if(act == "hardtanh"){self$activ <- nn_hardtanh(min_val, max_val)}
   },
   forward = function(x)
   {
-    x <- self$activ(x)
+  x <- self$activ(x)
   })
 
 
@@ -478,6 +711,29 @@ crps_loss <- function(actual, latent, params, distr, dev)
   return(loss)
 }
 
+###
+score_loss <- function(actual, latent, params, distr, dev)
+{
+  if(distr == "normal"){scores <- pnorm(as_array(actual$cpu()), mean = as_array(params[[1]]$cpu()), sd = as_array(params[[2]]$cpu())) - pnorm(as_array(latent$cpu()), mean = as_array(params[[1]]$cpu()), sd = as_array(params[[2]]$cpu()))}
+  if(distr == "genbeta"){scores <- pgenbeta(as_array(actual$cpu()), shape1 = as_array(params[[1]]$cpu()), shape2 = as_array(params[[2]]$cpu()), shape3 = as_array(params[[3]]$cpu())) - pgenbeta(as_array(latent$cpu()), shape1 = as_array(params[[1]]$cpu()), shape2 = as_array(params[[2]]$cpu()), shape3 = as_array(params[[3]]$cpu()))}
+  if(distr == "gev"){scores <- pgev(as_array(actual$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()), shape = as_array(params[[3]]$cpu())) - pgev(as_array(latent$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()), shape = as_array(params[[3]]$cpu()))}
+  if(distr == "gpd"){scores <- pgpd(as_array(actual$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()), shape = as_array(params[[3]]$cpu())) - pgpd(as_array(latent$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()), shape = as_array(params[[3]]$cpu()))}
+  if(distr == "genray"){scores <- pgenray(as_array(actual$cpu()), scale = as_array(params[[1]]$cpu()), shape = as_array(params[[2]]$cpu())) - pgenray(as_array(latent$cpu()), scale = as_array(params[[1]]$cpu()), shape = as_array(params[[2]]$cpu()))}
+  if(distr == "cauchy"){scores <- pcauchy(as_array(actual$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu())) - pcauchy(as_array(latent$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()))}
+  if(distr == "exp"){scores <- pexp(as_array(actual$cpu()), rate = as_array(params[[1]]$cpu())) - pexp(as_array(latent$cpu()), rate = as_array(params[[1]]$cpu()))}
+  if(distr == "logis"){scores <- plogis(as_array(actual$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu())) - plogis(as_array(latent$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()))}
+  if(distr == "chisq"){scores <- pchisq(as_array(actual$cpu()), df = as_array(params[[1]]$cpu()), ncp = as_array(params[[2]]$cpu())) - pchisq(as_array(latent$cpu()), df = as_array(params[[1]]$cpu()), ncp = as_array(params[[2]]$cpu()))}
+  if(distr == "gumbel"){scores <- pgumbel(as_array(actual$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu())) - pgumbel(as_array(latent$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()))}
+  if(distr == "laplace"){scores <- plaplace(as_array(actual$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu())) - plaplace(as_array(latent$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()))}
+  if(distr == "lognorm"){scores <- plnorm(as_array(actual$cpu()), meanlog = as_array(params[[1]]$cpu()), sdlog = as_array(params[[2]]$cpu())) - plnorm(as_array(latent$cpu()), meanlog = as_array(params[[1]]$cpu()), sdlog = as_array(params[[2]]$cpu()))}
+
+  loss <- mean(abs(scores[is.finite(scores)]), na.rm = TRUE)
+  torch_device(dev)
+  loss <- torch_tensor(loss, dtype = torch_float64(), requires_grad = TRUE)
+
+  return(loss)
+}
+
 
 elbo_loss <- function(actual, latent, params, distr, dev)
 {
@@ -596,15 +852,16 @@ tensor_apply <- function(fun, values = NULL, ...)
 }
 
 ###PREDICTION
-pred_fun <- function(model, new_data, type = "sample", quant = 0.5, seed = as.numeric(Sys.time()), dev)
+pred_fun <- function(model, new_data, type = "sample", quant = 0.5, seed = as.numeric(Sys.time()), n_sample, dev)
 {
   torch_device(dev)
   if(!("torch_tensor" %in% class(new_data))){new_data <- torch_tensor(as.array(new_data))}
   if(type=="sample"){pred <- as_array(model(new_data)$latent$cpu())}
+  if(type=="set"){pred <- abind(replicate(n = n_sample, as_array(model(new_data)$latent$cpu()), simplify = FALSE), along=-1)}###DRAWING SAMPLES FROM LATENT
 
   if(type == "quant" | type == "mean" | type == "mode")
   {
-    pred <- abind(replicate(100, as_array(model(new_data)$latent$cpu()), simplify = FALSE), along=-1)###DRAWING 100 SAMPLES FROM LATENT
+    pred <- abind(replicate(n = n_sample, as_array(model(new_data)$latent$cpu()), simplify = FALSE), along=-1)
     if(type == "quant"){pred <- apply(pred, c(2, 3, 4), quantile, probs = quant, na.rm = TRUE)}
     if(type == "mean"){pred <- apply(pred, c(2, 3, 4), mean, na.rm = TRUE)}
     if(type == "mode"){pred <- apply(pred, c(2, 3, 4), function(x) mlv1(x, method = "parzen"))}
@@ -676,6 +933,7 @@ training_function <- function(model, x_train, y_train, x_test = NULL, y_test = N
       train_results <- model(x_train[index,,])
       if(loss_metric == "elbo"){train_loss <- elbo_loss(actual = y_train[index,,], train_results$latent, train_results$params, train_results$distr, dev)}
       if(loss_metric == "crps"){train_loss <- crps_loss(actual = y_train[index,,], train_results$latent, train_results$params, train_results$distr, dev)}
+      if(loss_metric == "score"){train_loss <- score_loss(actual = y_train[index,,], train_results$latent, train_results$params, train_results$distr, dev)}
       train_batch_history[b] <- train_loss$item()
 
       train_loss$backward()
@@ -697,6 +955,7 @@ training_function <- function(model, x_train, y_train, x_test = NULL, y_test = N
         test_results <- model(x_test[index,,])
         if(loss_metric == "elbo"){test_loss <- elbo_loss(actual = y_test[index,,], test_results$latent, test_results$params, test_results$distr, dev)}
         if(loss_metric == "crps"){test_loss <- crps_loss(actual = y_test[index,,], test_results$latent, test_results$params, test_results$distr, dev)}
+        if(loss_metric == "score"){test_loss <- score_loss(actual = y_test[index,,], test_results$latent, test_results$params, test_results$distr, dev)}
         test_batch_history[b] <- test_loss$item()
       }
 
@@ -727,63 +986,6 @@ training_function <- function(model, x_train, y_train, x_test = NULL, y_test = N
   outcome <- list(model = model, train_history = train_history[1:t], test_history = test_history[1:t])
 
   return(outcome)
-}
-
-###
-eval_metrics <- function(actual, predicted)
-{
-  actual <- unlist(actual)
-  predicted <- unlist(predicted)
-  if(length(actual) != length(predicted)){stop("different lengths")}
-
-  rmse <- sqrt(mean((actual - predicted)^2, na.rm = TRUE))
-  mae <- mean(abs(actual - predicted), na.rm = TRUE)
-  mdae <- median(abs(actual - predicted), na.rm = TRUE)
-  mpe <- mean((actual - predicted)/actual, na.rm = TRUE)
-  mape <- mean(abs(actual - predicted)/abs(actual), na.rm = TRUE)
-  smape <- mean(abs(actual - predicted)/mean(c(abs(actual), abs(predicted))), na.rm = TRUE)
-  rrse <- sqrt(sum((actual - predicted)^2, na.rm = TRUE))/sqrt(sum((actual - mean(actual, na.rm = TRUE))^2, na.rm = TRUE))
-  rae <- sum(abs(actual - predicted), na.rm = TRUE)/sum(abs(actual - mean(actual, na.rm = TRUE)), na.rm = TRUE)
-
-  metrics <- round(c(rmse = rmse, mae = mae, mdae = mdae, mpe = mpe, mape = mape, smape = smape, rrse = rrse, rae = rae), 4)
-  return(metrics)
-}
-
-###
-sequential_kld <- function(matrix)
-{
-  n <- nrow(matrix)
-  if(n == 1){return(NA)}
-  dens <- apply(matrix, 1, function(x) density(x, from = min(matrix), to = max(matrix)))
-  backward <- dens[-n]
-  forward <- dens[-1]
-
-  seq_kld <- map2_dbl(forward, backward, ~ sum(.x$y * log(.x$y/.y$y)))
-  avg_seq_kld <- round(mean(seq_kld[is.finite(seq_kld)]), 3)
-
-  ratios <- log(dens[[n]]$y/dens[[1]]$y)
-  finite_index <- is.finite(ratios)
-
-  end_to_end_kld <- dens[[n]]$y * log(dens[[n]]$y/dens[[1]]$y)
-  end_to_end_kld <- round(sum(end_to_end_kld[finite_index]), 3)
-  kld_stats <- rbind(avg_seq_kld, end_to_end_kld)
-
-  return(kld_stats)
-}
-
-###
-upside_probability <- function(matrix)
-{
-  n <- nrow(matrix)
-  if(n == 1){return(NA)}
-  growths <- matrix[-1,]/matrix[-n,] - 1
-  dens <- apply(growths, 1, function(x) density(x, from = min(x), to = max(x)))
-  avg_upp <- round(mean(map_dbl(dens, ~ sum(.x$y[.x$x>0])/sum(.x$y))), 3)
-  end_growth <- matrix[n,]/matrix[1,] - 1
-  end_to_end_dens <- density(end_growth, from = min(end_growth), to = max(end_growth))
-  last_to_first_upp <- round(sum(end_to_end_dens$y[end_to_end_dens$x>0])/sum(end_to_end_dens$y), 3)
-  upp_stats <- rbind(avg_upp, last_to_first_upp)
-  return(upp_stats)
 }
 
 
@@ -892,32 +1094,6 @@ reframed_multiple_integration <- function(reframed, dmodels, spare_parts = NULL,
   return(reframed)
 }
 
-###
-reframe<-function(df, length, sequence_stride = FALSE)
-{
-  if(sequence_stride == FALSE)
-  {
-    slice_list <- split(df, along=2)
-    reframed <- abind(map(slice_list, ~ t(apply(embed(.x, dimension=length), 1, rev))), along=3)
-  }
-
-  if(sequence_stride == TRUE)
-  {
-    n_length <- nrow(df)
-    n_seq <- floor(n_length/length)
-    if(n_seq == 0){n_seq <- 1}
-    seq_index <- rep(1:n_seq, each = length)
-    df <- tail(df, length(seq_index))
-    slice_list <- split(df, along=2)
-    reframed <- map(slice_list, ~ Reduce(rbind, split(.x, along = 1, subsets = seq_index)))
-    if(n_seq == 1){reframed <- map(reframed, ~ array(.x, dim = c(1, length, 1)))}
-    reframed <- abind(reframed, along = 3)
-    rownames(reframed) <- NULL
-  }
-
-  return(reframed)
-}
-
 
 ###
 ts_graph <- function(x_hist, y_hist, x_forcat, y_forcat, lower = NULL, upper = NULL, line_size = 1.3, label_size = 11,
@@ -930,9 +1106,9 @@ ts_graph <- function(x_hist, y_hist, x_forcat, y_forcat, lower = NULL, upper = N
 
   if(!is.null(lower) & !is.null(upper)){forcat_data$lower <- lower; forcat_data$upper <- upper}
 
-  plot <- ggplot()+geom_line(data = all_data, aes(x = x_all, y = y_all), color = hist_line, size = line_size)
-  if(!is.null(lower) & !is.null(upper)){plot <- plot + geom_ribbon(data = forcat_data, aes(x = x_forcat, ymin = lower, ymax = upper), alpha = 0.3, fill = forcat_band)}
-  plot <- plot + geom_line(data = forcat_data, aes(x = x_forcat, y = y_forcat), color = forcat_line, size = line_size)
+  plot <- ggplot()+geom_line(data = all_data, aes_string(x = "x_all", y = "y_all"), color = hist_line, size = line_size)
+  if(!is.null(lower) & !is.null(upper)){plot <- plot + geom_ribbon(data = forcat_data, aes_string(x = "x_forcat", ymin = "lower", ymax = "upper"), alpha = 0.3, fill = forcat_band)}
+  plot <- plot + geom_line(data = forcat_data, aes_string(x = "x_forcat", y = "y_forcat"), color = forcat_line, size = line_size)
   if(!is.null(dbreak)){plot <- plot + scale_x_date(name = paste0("\n", label_x), date_breaks = dbreak, date_labels = date_format)}
   if(is.null(dbreak)){plot <- plot + xlab(label_x)}
   plot <- plot + scale_y_continuous(name = paste0(label_y, "\n"), labels = number)
@@ -943,7 +1119,7 @@ ts_graph <- function(x_hist, y_hist, x_forcat, y_forcat, lower = NULL, upper = N
 }
 
 ###
-block_sampler <- function(data, seq_len, n_blocks, block_minset, sequence_stride)
+block_sampler <- function(data, seq_len, n_blocks, block_minset, stride)
 {
   n_feat <- ncol(data)
   data_len <- nrow(data)
@@ -954,9 +1130,227 @@ block_sampler <- function(data, seq_len, n_blocks, block_minset, sequence_stride
   block_index <- sort(c(rep(1:n_blocks, each = floor(data_len/n_blocks)), rep(1, data_len%%n_blocks)))
 
   data_list <- split(data, along = 1, subsets = block_index, drop = FALSE)
-  block_set <- map(data_list, ~ reframe(.x, seq_len, sequence_stride))
+  block_set <- map(data_list, ~ block_reframer(.x, seq_len, stride))
   block_size <- map_dbl(block_set, ~ nrow(.x))
   if(any(block_size == 1)){stop("blocks with single sequence are not enough\n")}
 
-  return(block_set)
+  outcome <- list(block_set = block_set, block_index = block_index)
+
+  return(outcome)
 }
+
+###
+best_deriv <- function(ts, max_diff = 3, thresh = 0.001)
+{
+  pvalues <- vector(mode = "double", length = as.integer(max_diff))
+
+  for(d in 1:(max_diff + 1))
+  {
+    model <- lm(ts ~ t, data.frame(ts, t = 1:length(ts)))
+    pvalues[d] <- with(summary(model), pf(fstatistic[1], fstatistic[2], fstatistic[3],lower.tail=FALSE))
+    ts <- diff(ts)
+  }
+
+  best <- tail(cumsum(pvalues < thresh), 1)
+
+  return(best)
+}
+
+###
+block_reframer <- function(df, seq_len, stride)
+{
+  reframe_list <- map(df, ~ smart_reframer(.x, seq_len, stride))
+  reframed <- abind(reframe_list, along = 3)
+  rownames(reframed) <- NULL
+  return(reframed)
+}
+
+###
+smart_reframer <- function(ts, seq_len, stride)
+{
+  n_length <- length(ts)
+  if(seq_len > n_length | stride > n_length){stop("vector too short for sequence length or stride")}
+  if(n_length%%seq_len > 0){ts <- tail(ts, - (n_length%%seq_len))}
+  n_length <- length(ts)
+  idx <- base::seq(from = 1, to = (n_length - seq_len + 1), by = 1)
+  reframed <- t(sapply(idx, function(x) ts[x:(x+seq_len-1)]))
+  if(seq_len == 1){reframed <- t(reframed)}
+  idx <- rev(base::seq(nrow(reframed), 1, - stride))
+  reframed <- reframed[idx,,drop = F]
+  return(reframed)
+}
+
+###
+qpred <- function(raw_pred, ts, ci, error_scale = "naive", error_benchmark = "naive")
+{
+  raw_pred <- doxa_filter(ts, raw_pred)
+  quants <- sort(unique(c((1-ci)/2, 0.25, 0.5, 0.75, ci+(1-ci)/2)))
+
+  p_stats <- function(x){c(min = suppressWarnings(min(x, na.rm = TRUE)), quantile(x, probs = quants, na.rm = TRUE), max = suppressWarnings(max(x, na.rm = TRUE)), mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE), mode = suppressWarnings(mlv1(x[is.finite(x)], method = "shorth")), kurtosis = suppressWarnings(kurtosis(x[is.finite(x)], na.rm = TRUE)), skewness = suppressWarnings(skewness(x[is.finite(x)], na.rm = TRUE)))}
+  quant_pred <- as.data.frame(t(as.data.frame(apply(raw_pred, 2, p_stats))))
+  p_value <- apply(raw_pred, 2, function(x) ecdf(x)(seq(min(raw_pred), max(raw_pred), length.out = 1000)))
+  divergence <- c(max(p_value[,1] - seq(0, 1, length.out = 1000)), apply(p_value[,-1, drop = FALSE] - p_value[,-ncol(p_value), drop = FALSE], 2, function(x) abs(max(x, na.rm = TRUE))))
+  upside_prob <- c(mean((raw_pred[,1]/tail(ts, 1)) > 1, na.rm = T), apply(apply(raw_pred[,-1, drop = FALSE]/raw_pred[,-ncol(raw_pred), drop = FALSE], 2, function(x) x > 1), 2, mean, na.rm = T))
+  iqr_to_range <- (quant_pred[, "75%"] - quant_pred[, "25%"])/(quant_pred[, "max"] - quant_pred[, "min"])
+  above_to_below_range <- (quant_pred[, "max"] - quant_pred[, "50%"])/(quant_pred[, "50%"] - quant_pred[, "min"])
+  quant_pred <- round(cbind(quant_pred, iqr_to_range, above_to_below_range, upside_prob, divergence), 4)
+  rownames(quant_pred) <- NULL
+
+  return(quant_pred)
+}
+
+###
+doxa_filter <- function(ts, mat)
+{
+  discrete_check <- all(ts%%1 == 0)
+  all_positive_check <- all(ts >= 0)
+  all_negative_check <- all(ts <= 0)
+  monotonic_increase_check <- all(diff(ts) >= 0)
+  monotonic_decrease_check <- all(diff(ts) <= 0)
+
+  monotonic_fixer <- function(x, mode)
+  {
+    model <- recursive_diff(x, 1)
+    vect <- model$vector
+    if(mode == 0){vect[vect < 0] <- 0; vect <- invdiff(vect, model$head_value, add = TRUE)}
+    if(mode == 1){vect[vect > 0] <- 0; vect <- invdiff(vect, model$head_value, add = TRUE)}
+    return(vect)
+  }
+
+  if(all_positive_check){mat[mat < 0] <- 0}
+  if(all_negative_check){mat[mat > 0] <- 0}
+  if(discrete_check){mat <- round(mat)}
+  if(monotonic_increase_check){mat <- t(apply(mat, 1, function(x) monotonic_fixer(x, mode = 0)))}
+  if(monotonic_decrease_check){mat <- t(apply(mat, 1, function(x) monotonic_fixer(x, mode = 1)))}
+
+  mat <- na.omit(mat)
+
+  return(mat)
+}
+
+
+###
+custom_metrics <- function(holdout, forecast, actuals, error_scale = "naive", error_benchmark = "naive")
+{
+    scale <- switch(error_scale, "deviation" = sd(actuals), "naive" = mean(abs(diff(actuals))))
+    benchmark <- switch(error_benchmark, "average" = rep(mean(forecast), length(forecast)), "naive" = rep(tail(actuals, 1), length(forecast)))
+    me <- ME(holdout, forecast, na.rm = TRUE)
+    mae <- MAE(holdout, forecast, na.rm = TRUE)
+    mse <- MSE(holdout, forecast, na.rm = TRUE)
+    rmsse <- RMSSE(holdout, forecast, scale, na.rm = TRUE)
+    mre <- MRE(holdout, forecast, na.rm = TRUE)
+    mpe <- MPE(holdout, forecast, na.rm = TRUE)
+    mape <- MAPE(holdout, forecast, na.rm = TRUE)
+    rmae <- rMAE(holdout, forecast, benchmark, na.rm = TRUE)
+    rrmse <- rRMSE(holdout, forecast, benchmark, na.rm = TRUE)
+    rame <- rAME(holdout, forecast, benchmark, na.rm = TRUE)
+    mase <- MASE(holdout, forecast, scale, na.rm = TRUE)
+    smse <- sMSE(holdout, forecast, scale, na.rm = TRUE)
+    sce <- sCE(holdout, forecast, scale, na.rm = TRUE)
+    out <- round(c(me = me, mae = mae, mse = mse, rmsse = rmsse, mpe = mpe, mape = mape, rmae = rmae, rrmse = rrmse, rame = rame, mase = mase, smse = smse, sce = sce), 3)
+
+  return(out)
+}
+
+###
+plotter <- function(quant_pred, ci, ts, dates = NULL, time_unit = NULL, feat_name)
+{
+
+  seq_len <- nrow(quant_pred)
+  n_ts <- length(ts)
+
+  if(!is.null(dates) & !is.null(time_unit))
+  {
+    start <- as.Date(tail(dates, 1))
+    new_dates<- seq.Date(from = start, length.out = seq_len, by = time_unit)
+    x_hist <- dates
+    x_forcat <- new_dates
+    rownames(quant_pred) <- as.character(new_dates)
+  }
+  else
+  {
+    x_hist <- 1:n_ts
+    x_forcat <- (n_ts + 1):(n_ts + seq_len)
+    rownames(quant_pred) <- paste0("t", 1:seq_len)
+  }
+
+  quant_pred <- as.data.frame(quant_pred)
+  x_lab <- paste0("Forecasting Horizon for sequence n = ", seq_len)
+  y_lab <- paste0("Forecasting Values for ", feat_name)
+
+  lower_b <- paste0((1-ci)/2 * 100, "%")
+  upper_b <- paste0((ci+(1-ci)/2) * 100, "%")
+
+  plot <- ts_graph(x_hist = x_hist, y_hist = ts, x_forcat = x_forcat, y_forcat = quant_pred[, "50%"], lower = quant_pred[, lower_b], upper = quant_pred[, upper_b], label_x = x_lab, label_y = y_lab)
+  return(plot)
+}
+
+###
+smart_head <- function(x, n)
+{
+  if(n != 0){return(head(x, n))}
+  if(n == 0){return(x)}
+}
+
+###
+smart_tail <- function(x, n)
+{
+  if(n != 0){return(tail(x, n))}
+  if(n == 0){return(x)}
+}
+
+###
+gap_fixer <- function(df, date_feat, verbose, omit)
+{
+  if(omit == TRUE)
+  {
+    df <- na.omit(df)
+    if(!is.null(date_feat)){df[[date_feat]] <- as.Date(as.character(df[[date_feat]]))}
+    return(df)
+  }
+
+  if(!is.null(date_feat))
+  {
+    dates <- as.Date(as.character(df[[date_feat]]))
+    df[[date_feat]] <- dates
+    main_freq <- mfv1(diff.Date(dates))
+    fixed_dates <- data.frame(seq(head(dates, 1), tail(dates, 1), by = main_freq))
+    colnames(fixed_dates) <- date_feat
+    fixed_df <- suppressMessages(left_join(fixed_dates, df))
+    df <- as.data.frame(map(fixed_df, ~ na_kalman(.x)))
+    if(verbose == TRUE){cat("date and value gaps filled with kalman imputation\n")}
+  }
+
+  else
+  {
+    if(anyNA(df)){df <- as.data.frame(map(df, ~ na_kalman(.x))); if(verbose == TRUE){cat("value gaps filled with kalman imputation\n")}}
+    else {return(df)}
+  }
+
+  return(df)
+}
+
+###
+recursive_diff <- function(vector, deriv)
+{
+  vector <- unlist(vector)
+  head_value <- vector("numeric", deriv)
+  tail_value <- vector("numeric", deriv)
+  if(deriv==0){head_value = NULL; tail_value = NULL}
+  if(deriv > 0){for(i in 1:deriv){head_value[i] <- head(vector, 1); tail_value[i] <- tail(vector, 1); vector <- diff(vector)}}
+  outcome <- list(vector = vector, head_value = head_value, tail_value = tail_value)
+  return(outcome)
+}
+
+###
+invdiff <- function(vector, heads, add = FALSE)
+{
+  vector <- unlist(vector)
+  if(is.null(heads)){return(vector)}
+  for(d in length(heads):1){vector <- cumsum(c(heads[d], vector))}
+  if(add == FALSE){return(vector[-c(1:length(heads))])} else {return(vector)}
+}
+
+
+
+

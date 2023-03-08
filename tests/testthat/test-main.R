@@ -1,0 +1,53 @@
+test_that("Correct outcome format and size for base outcome1",
+          {
+            skip_if_not_installed("torch")
+            skip_if(is.na(tryCatch(cuda_is_available(), error = function(e) NA)))
+            outcome1 <- proteus(amzn_aapl_fb, target = "AMZN", future = 10, past = 10, n_blocks = 3)
+            expect_equal(class(outcome1), "list")
+            expect_equal(length(outcome1), 6)
+            expect_equal(names(outcome1), c("model_descr","prediction", "plot", "features_errors", "history", "time_log"))
+            expect_equal(is.character(outcome1$model_descr), TRUE)
+            expect_equal(is.data.frame(outcome1$prediction$AMZN), TRUE)
+            expect_equal(is.ggplot(outcome1$plot$AMZN), TRUE)
+            expect_equal(is.matrix(outcome1$features_errors$AMZN), TRUE)
+            expect_equal(dim(outcome1$features_errors$AMZN), c(2, 12))
+            expect_equal(dim(outcome1$prediction$AMZN), c(10, 16))
+            expect_equal(is.ggplot(outcome1$history), TRUE)
+            expect_equal(class(outcome1$time_log)[1],"Period")
+          })
+
+
+test_that("Correct outcome format and size for base outcome2",
+          {
+            skip_if_not_installed("torch")
+            skip_if(is.na(tryCatch(cuda_is_available(), error = function(e) NA)))
+            outcome2 <- proteus(amzn_aapl_fb, target = c("AMZN", "FB"), future = 20, past = 30, n_blocks = 3, dates = "Date")
+            expect_equal(class(outcome2), "list")
+            expect_equal(length(outcome2), 6)
+            expect_equal(names(outcome2), c("model_descr","prediction", "plot", "features_errors", "history", "time_log"))
+            expect_equal(is.character(outcome2$model_descr), TRUE)
+            expect_equal(is.data.frame(outcome2$prediction$AMZN), TRUE)
+            expect_equal(is.ggplot(outcome2$plot$FB), TRUE)
+            expect_equal(is.matrix(outcome2$features_errors$AMZN), TRUE)
+            expect_equal(dim(outcome2$features_errors$FB), c(2, 12))
+            expect_equal(dim(outcome2$prediction$AMZN), c(20, 16))
+            expect_equal(is.ggplot(outcome2$history), TRUE)
+            expect_equal(class(outcome2$time_log)[1],"Period")
+          })
+
+test_that("Correct outcome format and size for base outcome3",
+          {
+            skip_if_not_installed("torch")
+            skip_if(is.na(tryCatch(cuda_is_available(), error = function(e) NA)))
+            outcome3 <- proteus_random_search(3, amzn_aapl_fb, target = c("AMZN", "GOOGL"), future = 15, keep = TRUE)
+            expect_equal(class(outcome3), "list")
+            expect_equal(length(outcome3), 4)
+            expect_equal(names(outcome3), c("random_search","best", "time_log", "all_models"))
+            expect_equal(is.data.frame(outcome3$random_search), TRUE)
+            expect_equal(dim(outcome3$random_search), c(3, 21))
+            expect_equal(is.list(outcome3$best), TRUE)
+            expect_equal(length(outcome3$best), 6)
+            expect_equal(dim(outcome3$best$prediction$AMZN), c(15, 16))
+            expect_equal(length(outcome3$all_models), 3)
+            expect_equal(class(outcome3$time_log)[1],"Period")
+          })
