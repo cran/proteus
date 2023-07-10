@@ -31,6 +31,7 @@ proteus_random_search(
   error_scale = "naive",
   error_benchmark = "naive",
   batch_size = 30,
+  threshold = 0.005,
   seed = 42,
   omit = FALSE,
   keep = FALSE
@@ -89,6 +90,8 @@ proteus_random_search(
 
 \item{batch_size}{Positive integer. Default: 30.}
 
+\item{threshold}{Positive numeric. F-test significance for differentiation. Default: 0.005.}
+
 \item{seed}{Random seed. Default: 42.}
 
 \item{omit}{Logical. Flag to TRUE to remove missing values, otherwise all gaps, both in dates and values, will be filled with kalman filter. Default: FALSE.}
@@ -100,7 +103,7 @@ This function returns a list including:
 \itemize{
 \item random_search: summary of the sampled hyper-parameters and average error metrics.
 \item best: best model according to overall ranking on all average error metrics (for negative metrics, absolute value is considered).
-\item all_models: list with all the model generated (if keep flagged to TRUE).
+\item all_models: list with all generated models (if keep flagged to TRUE).
 \item time_log: computation time.
 }
 }

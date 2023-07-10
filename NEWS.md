@@ -9,3 +9,7 @@
 * Various improvement and code consolidation.
 * Added function for hyper-param random search.
 * Added another loss function (score).
+
+# proteus 1.1.1
+* Added threshold parameter to control the automatic differentiation.
+* Besides prediction, now you get also a sampler for each prediction point.

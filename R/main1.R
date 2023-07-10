@@ -28,6 +28,7 @@
 #' @param error_benchmark String. Benchmark for the relative error metrics. Two options: "naive" (sequential extension of last value) or "average" (mean value of true sequence). Default: "naive".
 #' @param batch_size Positive integer. Default: 30.
 #' @param omit Logical. Flag to TRUE to remove missing values, otherwise all gaps, both in dates and values, will be filled with kalman filter. Default: FALSE.
+#' @param threshold Positive numeric. F-test significance for differentiation. Default: 0.005.
 #' @param seed Random seed. Default: 42.
 #'
 #' @author Giancarlo Vercellino \email{giancarlo.vercellino@gmail.com}
@@ -37,6 +38,7 @@
 #' \itemize{
 #'\item model_descr: brief model description (number of tensors and parameters)
 #'\item prediction: a table with quantile predictions, mean, std, mode, skewness and kurtosis for each time feature (and other metrics, such as iqr_to_range, above_to_below_range, upside_prob, divergence).
+#'\item pred_sampler: empirical function for sampling each prediction point for each time feature
 #'\item plot: graph with history and prediction for each time feature
 #'\item feature_errors: train and test error for each time feature (me, mae, mse, rmsse, mpe, mape, rmae, rrmse, rame, mase, smse, sce)
 #'\item history: average cross-validation loss across blocks
@@ -75,7 +77,7 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
                     t_embed = 30, activ = "linear", nodes = 32, distr = "normal", optim = "adam",
                     loss_metric = "crps", epochs = 30, lr = 0.01, patience = 10, latent_sample = 100, verbose = TRUE,
                     stride = 1, dates = NULL, rolling_blocks = FALSE, n_blocks = 4, block_minset = 30,
-                    error_scale = "naive", error_benchmark = "naive", batch_size = 30, omit = FALSE, seed = 42)
+                    error_scale = "naive", error_benchmark = "naive", batch_size = 30, omit = FALSE, threshold = 0.005, seed = 42)
 {
 
   tic.clearlog()
@@ -83,7 +85,7 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
 
   ###PRECHECK
   if(cuda_is_available()){dev <- "cuda"} else {dev <- "cpu"}
-  deriv <- map_dbl(data[, target, drop = FALSE], ~ best_deriv(.x))
+  deriv <- map_dbl(data[, target, drop = FALSE], ~ best_deriv(.x, threshold))
 
   if(max(deriv) >= future | max(deriv) >= past){stop("deriv cannot be equal or greater than future and/or past")}
   if(future <= 0 | past <= 0){stop("past and future must be strictly positive integers")}
@@ -256,6 +258,10 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
 
   plot <- pmap(list(data, prediction, target), ~ plotter(quant_pred = ..2, ci, ts = ..1, dates = date_vector, time_unit, feat_name = ..3))
 
+  pred_sampler <- map2(smart_split(integrated_pred, along = 3), data, ~ apply(doxa_filter(.y, .x), 2, function(x) function() sample(x, 1)))
+  names(pred_sampler) <- target
+  pred_sampler <- map2(pred_sampler, prediction, ~ {names(.x) <- rownames(.y); return(.x)})
+
   n_tensors <- length(model$parameters)
   n_parameters <- sum(map_dbl(model$parameters, ~ length(as.vector(as_array(.x)))))
   if(verbose==TRUE){cat("\nvariational model based on", distr, "latent distribution with", n_tensors, "tensors and", n_parameters, "parameters\n")}
@@ -265,7 +271,7 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
   time_log<-seconds_to_period(round(parse_number(unlist(tic.log())), 0))
 
   ###OUTCOMES
-  outcome <- list(model_descr = model_descr, prediction = prediction, plot = plot, features_errors = features_errors, history = history, time_log = time_log)
+  outcome <- list(model_descr = model_descr, prediction = prediction, pred_sampler = pred_sampler, plot = plot, features_errors = features_errors, history = history, time_log = time_log)
 
   return(outcome)
 
@@ -1140,7 +1146,7 @@ block_sampler <- function(data, seq_len, n_blocks, block_minset, stride)
 }
 
 ###
-best_deriv <- function(ts, max_diff = 3, thresh = 0.001)
+best_deriv <- function(ts, max_diff = 3, thresh = 0.005)
 {
   pvalues <- vector(mode = "double", length = as.integer(max_diff))
 

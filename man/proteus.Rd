@@ -31,6 +31,7 @@ proteus(
   error_benchmark = "naive",
   batch_size = 30,
   omit = FALSE,
+  threshold = 0.005,
   seed = 42
 )
 }
@@ -87,6 +88,8 @@ proteus(
 
 \item{omit}{Logical. Flag to TRUE to remove missing values, otherwise all gaps, both in dates and values, will be filled with kalman filter. Default: FALSE.}
 
+\item{threshold}{Positive numeric. F-test significance for differentiation. Default: 0.005.}
+
 \item{seed}{Random seed. Default: 42.}
 }
 \value{
@@ -94,6 +97,7 @@ This function returns a list including:
 \itemize{
 \item model_descr: brief model description (number of tensors and parameters)
 \item prediction: a table with quantile predictions, mean, std, mode, skewness and kurtosis for each time feature (and other metrics, such as iqr_to_range, above_to_below_range, upside_prob, divergence).
+\item pred_sampler: empirical function for sampling each prediction point for each time feature
 \item plot: graph with history and prediction for each time feature
 \item feature_errors: train and test error for each time feature (me, mae, mse, rmsse, mpe, mape, rmae, rrmse, rame, mase, smse, sce)
 \item history: average cross-validation loss across blocks
