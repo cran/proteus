@@ -31,8 +31,9 @@ proteus_random_search(
   error_scale = "naive",
   error_benchmark = "naive",
   batch_size = 30,
-  threshold = 0.005,
+  min_default = 1,
   seed = 42,
+  future_plan = "future::multisession",
   omit = FALSE,
   keep = FALSE
 )
@@ -90,9 +91,11 @@ proteus_random_search(
 
 \item{batch_size}{Positive integer. Default: 30.}
 
-\item{threshold}{Positive numeric. F-test significance for differentiation. Default: 0.005.}
+\item{min_default}{Positive numeric. Minimum differentiation iteration. Default: 1.}
 
 \item{seed}{Random seed. Default: 42.}
+
+\item{future_plan}{how to resolve the future parallelization. Options are: "future::sequential", "future::multisession", "future::multicore". For more information, take a look at future specific documentation. Default: "future::multisession".}
 
 \item{omit}{Logical. Flag to TRUE to remove missing values, otherwise all gaps, both in dates and values, will be filled with kalman filter. Default: FALSE.}
 

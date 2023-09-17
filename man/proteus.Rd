@@ -31,7 +31,8 @@ proteus(
   error_benchmark = "naive",
   batch_size = 30,
   omit = FALSE,
-  threshold = 0.005,
+  min_default = 1,
+  future_plan = "future::multisession",
   seed = 42
 )
 }
@@ -88,7 +89,9 @@ proteus(
 
 \item{omit}{Logical. Flag to TRUE to remove missing values, otherwise all gaps, both in dates and values, will be filled with kalman filter. Default: FALSE.}
 
-\item{threshold}{Positive numeric. F-test significance for differentiation. Default: 0.005.}
+\item{min_default}{Positive numeric. Minimum differentiation iteration. Default: 1.}
+
+\item{future_plan}{how to resolve the future parallelization. Options are: "future::sequential", "future::multisession", "future::multicore". For more information, take a look at future specific documentation. Default: "future::multisession".}
 
 \item{seed}{Random seed. Default: 42.}
 }

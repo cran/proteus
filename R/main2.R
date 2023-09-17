@@ -28,8 +28,9 @@
 #' @param error_scale String. Scale for the scaled error metrics (for continuous variables). Two options: "naive" (average of naive one-step absolute error for the historical series) or "deviation" (standard error of the historical series). Default: "naive".
 #' @param error_benchmark String. Benchmark for the relative error metrics (for continuous variables). Two options: "naive" (sequential extension of last value) or "average" (mean value of true sequence). Default: "naive".
 #' @param batch_size Positive integer. Default: 30.
-#' @param threshold Positive numeric. F-test significance for differentiation. Default: 0.005.
+#' @param min_default Positive numeric. Minimum differentiation iteration. Default: 1.
 #' @param seed Random seed. Default: 42.
+#' @param future_plan how to resolve the future parallelization. Options are: "future::sequential", "future::multisession", "future::multicore". For more information, take a look at future specific documentation. Default: "future::multisession".
 #' @param omit Logical. Flag to TRUE to remove missing values, otherwise all gaps, both in dates and values, will be filled with kalman filter. Default: FALSE.
 #' @param keep Logical. Flag to TRUE to keep all the explored models. Default: FALSE.
 #'
@@ -67,6 +68,8 @@
 #' @importFrom moments skewness kurtosis
 #' @importFrom greybox ME MAE MSE RMSSE MRE MPE MAPE rMAE rRMSE rAME MASE sMSE sCE
 #' @importFrom ggthemes theme_clean
+#' @import furrr
+#' @import future
 #'
 #' @references https://rpubs.com/giancarlo_vercellino/proteus
 #'
@@ -74,7 +77,9 @@ proteus_random_search <- function(n_samp, data, target, future, past = NULL, ci 
                                   t_embed = NULL, activ = NULL, nodes = NULL, distr = NULL, optim = NULL,
                                   loss_metric = "crps", epochs = 30, lr = NULL, patience = 10, latent_sample = 100, verbose = TRUE,
                                   stride = NULL, dates = NULL, rolling_blocks = FALSE, n_blocks = 4, block_minset = 10,
-                                  error_scale = "naive", error_benchmark = "naive", batch_size = 30, threshold = 0.005, seed = 42, omit = FALSE, keep = FALSE)
+                                  error_scale = "naive", error_benchmark = "naive", batch_size = 30,
+                                  min_default = 1, seed = 42, future_plan = "future::multisession",
+                                  omit = FALSE, keep = FALSE)
 {
   tic.clearlog()
   tic("random search")
@@ -92,11 +97,16 @@ proteus_random_search <- function(n_samp, data, target, future, past = NULL, ci 
 
   hyper_params <- list(past_param, embed_param, act_param, node_param, distr_param, opt_param, lrn_param, strd_param)
 
-  models <- pmap(hyper_params, ~ proteus(data, target, future, past = ..1, ci, smoother,
+  high_level <- availableCores()%/%2
+  low_level <- availableCores()%/%high_level
+  plan(list(tweak(future_plan, workers = high_level), tweak(future_plan, workers = low_level)))
+
+  models <- future_pmap(hyper_params, ~ proteus(data, target, future, past = ..1, ci, smoother,
                                                 t_embed = ..2, activ = ..3, nodes = ..4, distr = ..5, optim = ..6,
                                                 loss_metric, epochs, lr = ..7, patience, latent_sample, verbose,
                                                 stride = ..8, dates, rolling_blocks, n_blocks, block_minset,
-                                                error_scale, error_benchmark, batch_size, omit, seed))
+                                                error_scale, error_benchmark, batch_size, omit, min_default,
+                                                future_plan, seed), .options = furrr_options(seed = T))
 
   n_feats <- length(target)
 

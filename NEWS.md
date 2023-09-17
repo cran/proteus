@@ -13,3 +13,9 @@
 # proteus 1.1.1
 * Added threshold parameter to control the automatic differentiation.
 * Besides prediction, now you get also a sampler for each prediction point.
+
+# proteus 1.1.2
+* Substitution of threshold parameter with min_default.
+
+# proteus 1.1.3
+* Added option doing block validation in parallel. Improved numeric stability.

@@ -28,7 +28,8 @@
 #' @param error_benchmark String. Benchmark for the relative error metrics. Two options: "naive" (sequential extension of last value) or "average" (mean value of true sequence). Default: "naive".
 #' @param batch_size Positive integer. Default: 30.
 #' @param omit Logical. Flag to TRUE to remove missing values, otherwise all gaps, both in dates and values, will be filled with kalman filter. Default: FALSE.
-#' @param threshold Positive numeric. F-test significance for differentiation. Default: 0.005.
+#' @param min_default Positive numeric. Minimum differentiation iteration. Default: 1.
+#' @param future_plan how to resolve the future parallelization. Options are: "future::sequential", "future::multisession", "future::multicore". For more information, take a look at future specific documentation. Default: "future::multisession".
 #' @param seed Random seed. Default: 42.
 #'
 #' @author Giancarlo Vercellino \email{giancarlo.vercellino@gmail.com}
@@ -70,6 +71,8 @@
 #' @importFrom moments skewness kurtosis
 #' @importFrom greybox ME MAE MSE RMSSE MRE MPE MAPE rMAE rRMSE rAME MASE sMSE sCE
 #' @importFrom ggthemes theme_clean
+#' @import furrr
+#' @import future
 #'
 #' @references https://rpubs.com/giancarlo_vercellino/proteus
 #'
@@ -77,7 +80,8 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
                     t_embed = 30, activ = "linear", nodes = 32, distr = "normal", optim = "adam",
                     loss_metric = "crps", epochs = 30, lr = 0.01, patience = 10, latent_sample = 100, verbose = TRUE,
                     stride = 1, dates = NULL, rolling_blocks = FALSE, n_blocks = 4, block_minset = 30,
-                    error_scale = "naive", error_benchmark = "naive", batch_size = 30, omit = FALSE, threshold = 0.005, seed = 42)
+                    error_scale = "naive", error_benchmark = "naive", batch_size = 30, omit = FALSE,
+                    min_default = 1, future_plan = "future::multisession", seed = 42)
 {
 
   tic.clearlog()
@@ -85,7 +89,7 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
 
   ###PRECHECK
   if(cuda_is_available()){dev <- "cuda"} else {dev <- "cpu"}
-  deriv <- map_dbl(data[, target, drop = FALSE], ~ best_deriv(.x, threshold))
+  deriv <- map_dbl(data[, target, drop = FALSE], ~ best_deriv(.x, min_default = min_default))
 
   if(max(deriv) >= future | max(deriv) >= past){stop("deriv cannot be equal or greater than future and/or past")}
   if(future <= 0 | past <= 0){stop("past and future must be strictly positive integers")}
@@ -114,13 +118,14 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
   feature_block <- 1:past
   target_block <- (past - max(deriv) + 1):(past + future)
 
-  train_history_list <- vector("list", n_blocks-1)
-  test_history_list <- vector("list", n_blocks-1)
-  block_features_errors <- vector("list", n_blocks-1)
-  block_learning_errors <- vector("list", n_blocks-1)
-  block_raw_errors <- vector("list", n_blocks-1)
+  #train_history_list <- vector("list", n_blocks-1)
+  #test_history_list <- vector("list", n_blocks-1)
+  #block_features_errors <- vector("list", n_blocks-1)
+  #block_raw_errors <- vector("list", n_blocks-1)
 
-  for(n in 1:(n_blocks-1))
+  plan(future_plan)
+
+  cross_validation_results <- future_map(1:(n_blocks-1), function(n)
   {
     if(verbose == TRUE){cat("\nblock", n,"\n")}
     if(rolling_blocks == FALSE){train_reframed <- abind(block_set[1:n], along = 1)}
@@ -173,21 +178,29 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
     test_true <- test_reframed[,predict_block,,drop=FALSE]
     test_errors <- pmap(list(smart_split(test_true, along = 3), smart_split(pred_test, along = 3), data), ~ custom_metrics(..1, ..2, actuals = ..3[block_index == n], error_scale, error_benchmark))
 
-    block_raw_errors[[n]] <- aperm(apply(test_true - pred_test, c(1, 2, 3), mean, na.rm=TRUE), c(2, 1, 3))
+    block_raw_errors <- aperm(apply(test_true - pred_test, c(1, 2, 3), mean, na.rm=TRUE), c(2, 1, 3))
 
     features_errors <- transpose(list(train_errors, test_errors))
     features_errors <- map(features_errors, ~ Reduce(rbind, .x))
     features_errors <- map(features_errors, ~ {rownames(.x) <- c("train", "test"); return(.x)})
     names(features_errors) <- target
 
-    train_history_list[[n]] <- training$train_history
-    test_history_list[[n]] <- training$test_history
+    train_history_list <- training$train_history
+    test_history_list <- training$test_history
 
-    block_features_errors[[n]] <- features_errors
-  }
+    block_features_errors <- features_errors
 
-  features_errors <- map(transpose(block_features_errors), ~ Reduce('+', .x)/(n_blocks-1))
-  raw_errors <- aperm(abind(block_raw_errors, along = 2), c(2, 1, 3))
+    out <- list(train_history_list = train_history_list, test_history_list = test_history_list,
+                block_features_errors = block_features_errors, block_raw_errors = block_raw_errors,
+                new_reframed = new_reframed)
+
+    return(out)
+  }, .options = furrr_options(seed = T))
+
+  cv_transposed <- transpose(cross_validation_results)
+
+  features_errors <- map(transpose(cv_transposed$block_features_errors), ~ Reduce('+', .x)/(n_blocks-1))
+  raw_errors <- aperm(abind(cv_transposed$block_raw_errors, along = 2), c(2, 1, 3))
 
   ###FINAL MODEL
   if(verbose == TRUE){cat("\nfinal training on all", n_blocks,"\n")}
@@ -202,7 +215,7 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
   y_train_deriv_model <- reframed_multiple_differentiation(y_train, deriv)
   y_train <- y_train_deriv_model$reframed
 
-  new_data_deriv_model <- reframed_multiple_differentiation(new_reframed, deriv)
+  new_data_deriv_model <- reframed_multiple_differentiation(cv_transposed$new_reframed[[n_blocks-1]], deriv)
   new_reframed <- new_data_deriv_model$reframed
 
   model <- nn_variational_model(target_len = future, seq_len = past - max(deriv), n_feat = n_feat, t_embed = t_embed, activ = activ, nodes = nodes, dev = dev, distr = distr)
@@ -211,13 +224,13 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
   model <- training$model
 
   ###LOSS PLOT
-  len <- map_dbl(train_history_list, ~length(.x))
+  len <- map_dbl(cv_transposed$train_history_list, ~length(.x))
   extend <- max(len) - len
-  cv_train_history <- colMeans(Reduce(rbind, map2(train_history_list, extend, ~ c(.x, rep(smart_tail(.x, 1), .y)))))
+  cv_train_history <- colMeans(Reduce(rbind, map2(cv_transposed$train_history_list, extend, ~ c(.x, rep(smart_tail(.x, 1), .y)))))
 
-  len <- map_dbl(test_history_list, ~length(.x))
+  len <- map_dbl(cv_transposed$test_history_list, ~length(.x))
   extend <- max(len) - len
-  cv_test_history <- colMeans(Reduce(rbind, map2(test_history_list, extend, ~c(.x, rep(smart_tail(.x, 1), .y)))))
+  cv_test_history <- colMeans(Reduce(rbind, map2(cv_transposed$test_history_list, extend, ~c(.x, rep(smart_tail(.x, 1), .y)))))
 
   act_epochs <- min(c(length(cv_train_history), length(cv_test_history)))
   x_ref_point <- c(quantile(1:act_epochs, 0.15), quantile(1:act_epochs, 0.75))
@@ -258,7 +271,7 @@ proteus <- function(data, target, future, past, ci = 0.8, smoother = FALSE,
 
   plot <- pmap(list(data, prediction, target), ~ plotter(quant_pred = ..2, ci, ts = ..1, dates = date_vector, time_unit, feat_name = ..3))
 
-  pred_sampler <- map2(smart_split(integrated_pred, along = 3), data, ~ apply(doxa_filter(.y, .x), 2, function(x) function() sample(x, 1)))
+  pred_sampler <- map2(smart_split(integrated_pred, along = 3), data, ~ apply(doxa_filter(.y, .x), 2, function(x) function(n = 1) sample(x, n, replace = TRUE)))
   names(pred_sampler) <- target
   pred_sampler <- map2(pred_sampler, prediction, ~ {names(.x) <- rownames(.y); return(.x)})
 
@@ -1146,7 +1159,7 @@ block_sampler <- function(data, seq_len, n_blocks, block_minset, stride)
 }
 
 ###
-best_deriv <- function(ts, max_diff = 3, thresh = 0.005)
+best_deriv <- function(ts, max_diff = 3, min_default = NULL, thresh = 0.001)
 {
   pvalues <- vector(mode = "double", length = as.integer(max_diff))
 
@@ -1158,6 +1171,7 @@ best_deriv <- function(ts, max_diff = 3, thresh = 0.005)
   }
 
   best <- tail(cumsum(pvalues < thresh), 1)
+  if(is.numeric(min_default) && best < min_default){best <- min_default}
 
   return(best)
 }
