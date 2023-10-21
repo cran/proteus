@@ -12,7 +12,7 @@
 #' @param t_embed Positive integer. Number of embedding for the temporal dimension. Minimum value is equal to 2. Default: NULL (search range 2:30).
 #' @param activ String. Activation function to be used by the forward network. Implemented functions are: "linear", "mish", "swish", "leaky_relu", "celu", "elu", "gelu", "selu", "bent", "softmax", "softmin", "softsign", "softplus", "sigmoid", "tanh". Default: NULL (full-option search).
 #' @param nodes Positive integer. Nodes for the forward neural net. Default: NULL (search range 2:1024).
-#' @param distr String. Distribution to be used by variational model. Implemented distributions are: "normal", "genbeta", "gev", "gpd", "genray", "cauchy", "exp", "logis", "chisq", "gumbel", "laplace", "lognorm". Default: NULL (full-option search).
+#' @param distr String. Distribution to be used by variational model. Implemented distributions are: "normal", "genbeta", "gev", "gpd", "genray", "cauchy", "exp", "logis", "chisq", "gumbel", "laplace", "lognorm", "skewed". Default: NULL (full-option search).
 #' @param optim String. Optimization method. Implemented methods are: "adadelta", "adagrad", "rmsprop", "rprop", "sgd", "asgd", "adam". Default: NULL (full-option search).
 #' @param loss_metric String. Loss function for the variational model. Three options: "elbo", "crps", "score". Default: "crps".
 #' @param epochs Positive integer. Default: 30.
@@ -20,7 +20,7 @@
 #' @param patience Positive integer. Waiting time (in epochs) before evaluating the overfit performance. Default: epochs.
 #' @param latent_sample Positive integer. Number of samples to draw from the latent variables. Default: 100.
 #' @param verbose Logical. Default: TRUE
-#' @param stride Positive integer. Number of shifting positions for sequence generation. Default: NULL (search range 1:10).
+#' @param stride Positive integer. Number of shifting positions for sequence generation. Default: NULL (search range 1:3).
 #' @param dates String. Label of feature where dates are located. Default: NULL (progressive numbering).
 #' @param rolling_blocks Logical. Option for incremental or rolling window. Default: FALSE.
 #' @param n_blocks Positive integer. Number of distinct blocks for back-testing. Default: 4.
@@ -90,15 +90,15 @@ proteus_random_search <- function(n_samp, data, target, future, past = NULL, ci 
   embed_param <- sampler(t_embed, n_samp, range = 2:30, integer = T)
   act_param <- sampler(activ, n_samp, range = c("linear", "mish", "swish", "leaky_relu", "celu", "elu", "gelu", "selu", "bent", "softmax", "softmin", "softsign", "softplus", "sigmoid", "tanh"))
   node_param <- sampler(nodes, n_samp, range = c(2:1024), integer = T)
-  distr_param <- sampler(distr, n_samp, range = c("normal", "genbeta", "gev", "gpd", "genray", "cauchy", "exp", "logis", "chisq", "gumbel", "laplace", "lognorm"))
+  distr_param <- sampler(distr, n_samp, range = c("normal", "genbeta", "gev", "gpd", "genray", "cauchy", "exp", "logis", "chisq", "gumbel", "laplace", "lognorm", "skewed"))
   opt_param <- sampler(optim, n_samp, range = c("adam", "adagrad", "adadelta", "sgd", "asgd", "rprop", "rmsprop"))
   lrn_param <- round(sampler(lr, n_samp, range = seq(0.001, 0.1, length.out = 1000), integer = F), 3)
-  strd_param <- sampler(stride, n_samp, range = 1:10, integer = T)
+  strd_param <- sampler(stride, n_samp, range = 1:3, integer = T)
 
   hyper_params <- list(past_param, embed_param, act_param, node_param, distr_param, opt_param, lrn_param, strd_param)
-
-  high_level <- availableCores()%/%2
-  low_level <- availableCores()%/%high_level
+  n_cores <- availableCores() - 1
+  high_level <- n_cores%/%2
+  low_level <- n_cores%/%high_level
   plan(list(tweak(future_plan, workers = high_level), tweak(future_plan, workers = low_level)))
 
   models <- future_pmap(hyper_params, ~ proteus(data, target, future, past = ..1, ci, smoother,

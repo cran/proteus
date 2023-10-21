@@ -59,7 +59,7 @@ proteus_random_search(
 
 \item{nodes}{Positive integer. Nodes for the forward neural net. Default: NULL (search range 2:1024).}
 
-\item{distr}{String. Distribution to be used by variational model. Implemented distributions are: "normal", "genbeta", "gev", "gpd", "genray", "cauchy", "exp", "logis", "chisq", "gumbel", "laplace", "lognorm". Default: NULL (full-option search).}
+\item{distr}{String. Distribution to be used by variational model. Implemented distributions are: "normal", "genbeta", "gev", "gpd", "genray", "cauchy", "exp", "logis", "chisq", "gumbel", "laplace", "lognorm", "skewed". Default: NULL (full-option search).}
 
 \item{optim}{String. Optimization method. Implemented methods are: "adadelta", "adagrad", "rmsprop", "rprop", "sgd", "asgd", "adam". Default: NULL (full-option search).}
 
@@ -75,7 +75,7 @@ proteus_random_search(
 
 \item{verbose}{Logical. Default: TRUE}
 
-\item{stride}{Positive integer. Number of shifting positions for sequence generation. Default: NULL (search range 1:10).}
+\item{stride}{Positive integer. Number of shifting positions for sequence generation. Default: NULL (search range 1:3).}
 
 \item{dates}{String. Label of feature where dates are located. Default: NULL (progressive numbering).}
 

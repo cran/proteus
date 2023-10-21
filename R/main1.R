@@ -11,7 +11,7 @@
 #' @param t_embed Positive integer. Number of embedding for the temporal dimension. Minimum value is equal to 2. Default: 30.
 #' @param activ String. Activation function to be used by the forward network. Implemented functions are: "linear", "mish", "swish", "leaky_relu", "celu", "elu", "gelu", "selu", "bent", "softmax", "softmin", "softsign", "softplus", "sigmoid", "tanh". Default: "linear".
 #' @param nodes Positive integer. Nodes for the forward neural net. Default: 32.
-#' @param distr String. Distribution to be used by variational model. Implemented distributions are: "normal", "genbeta", "gev", "gpd", "genray", "cauchy", "exp", "logis", "chisq", "gumbel", "laplace", "lognorm". Default: "normal".
+#' @param distr String. Distribution to be used by variational model. Implemented distributions are: "normal", "genbeta", "gev", "gpd", "genray", "cauchy", "exp", "logis", "chisq", "gumbel", "laplace", "lognorm", "skewed". Default: "normal".
 #' @param optim String. Optimization method. Implemented methods are: "adadelta", "adagrad", "rmsprop", "rprop", "sgd", "asgd", "adam".
 #' @param loss_metric String. Loss function for the variational model. Three options: "elbo", "crps", "score". Default: "crps".
 #' @param epochs Positive integer. Default: 30.
@@ -73,6 +73,7 @@
 #' @importFrom ggthemes theme_clean
 #' @import furrr
 #' @import future
+#' @importFrom sn rsn psn dsn
 #'
 #' @references https://rpubs.com/giancarlo_vercellino/proteus
 #'
@@ -405,6 +406,7 @@ nn_variational_model <- nn_module(
     if(distr == "gumbel"){self$var_model <- nn_gumbel_layer(target_len, seq_len, n_feat, t_embed, activ, nodes, dev)}
     if(distr == "laplace"){self$var_model <- nn_laplace_layer(target_len, seq_len, n_feat, t_embed, activ, nodes, dev)}
     if(distr == "lognorm"){self$var_model <- nn_lognorm_layer(target_len, seq_len, n_feat, t_embed, activ, nodes, dev)}
+    if(distr == "skewed"){self$var_model <- nn_skewed_layer(target_len, seq_len, n_feat, t_embed, activ, nodes, dev)}
   },
   forward = function(x)
   {
@@ -413,6 +415,32 @@ nn_variational_model <- nn_module(
     outcome <- list(latent = result[[1]], params = result[-1], distr = distr)
     return(outcome)
   })
+
+nn_skewed_layer <- nn_module(
+  "nn_skewed_layer",
+  initialize = function(target_len, seq_len, n_feat, t_embed, activ, nodes, dev)
+  {
+    self$xi_param <- nn_time_transformation(target_len, seq_len, n_feat, t_embed, activ, nodes, dev)
+    self$omega_param <- nn_time_transformation(target_len, seq_len, n_feat, t_embed, activ, nodes, dev)
+    self$alpha_param <- nn_time_transformation(target_len, seq_len, n_feat, t_embed, activ, nodes, dev)
+    self$dev <- nn_buffer(dev)
+  },
+  forward = function(x)
+  {
+    dev <- self$dev
+    torch_device(dev)
+
+    xi_param <- self$xi_param(x)
+    omega_param <- torch_square(self$omega_param(x))
+    alpha_param <- self$alpha_param(x)
+
+    latent <- tensor_apply(rsn, values = NULL, "xi" = as_array(xi_param), "omega" = as_array(omega_param), "alpha" = as_array(alpha_param))
+    latent <- torch_tensor(latent)
+
+    outcome <- list(latent = latent, xi_param = xi_param, omega_param = omega_param, alpha_param = alpha_param)
+    return(outcome)
+  })
+
 
 nn_normal_layer <- nn_module(
   "nn_normal_layer",
@@ -720,6 +748,7 @@ crps_loss <- function(actual, latent, params, distr, dev)
   if(distr == "gumbel"){latent_cdf <- pgumbel(as_array(latent$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()))}
   if(distr == "laplace"){latent_cdf <- plaplace(as_array(latent$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()))}
   if(distr == "lognorm"){latent_cdf <- plnorm(as_array(latent$cpu()), meanlog = as_array(params[[1]]$cpu()), sdlog = as_array(params[[2]]$cpu()))}
+  if(distr == "skewed"){latent_cdf <- psn(as_array(latent$cpu()), xi = as_array(params[[1]]$cpu()), omega = as_array(params[[2]]$cpu()), alpha = as_array(params[[3]]$cpu()))}
   error <- as_array(latent$cpu()) - as_array(actual$cpu())
   heaviside_step <- error >= 0
   loss <- mean((latent_cdf - heaviside_step)^2)###MEAN INSTEAD OF SUM
@@ -745,6 +774,7 @@ score_loss <- function(actual, latent, params, distr, dev)
   if(distr == "gumbel"){scores <- pgumbel(as_array(actual$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu())) - pgumbel(as_array(latent$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()))}
   if(distr == "laplace"){scores <- plaplace(as_array(actual$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu())) - plaplace(as_array(latent$cpu()), location = as_array(params[[1]]$cpu()), scale = as_array(params[[2]]$cpu()))}
   if(distr == "lognorm"){scores <- plnorm(as_array(actual$cpu()), meanlog = as_array(params[[1]]$cpu()), sdlog = as_array(params[[2]]$cpu())) - plnorm(as_array(latent$cpu()), meanlog = as_array(params[[1]]$cpu()), sdlog = as_array(params[[2]]$cpu()))}
+  if(distr == "skewed"){scores <- psn(as_array(actual$cpu()), xi = as_array(params[[1]]$cpu()), omega = as_array(params[[2]]$cpu()), alpha = as_array(params[[3]]$cpu())) - psn(as_array(latent$cpu()), xi = as_array(params[[1]]$cpu()), omega = as_array(params[[2]]$cpu()), alpha = as_array(params[[3]]$cpu()))}
 
   loss <- mean(abs(scores[is.finite(scores)]), na.rm = TRUE)
   torch_device(dev)
@@ -842,6 +872,13 @@ elbo_loss <- function(actual, latent, params, distr, dev)
     latent_pdf <- dlnorm(as_array(latent$cpu()), meanlog = as_array(params[[1]]$cpu()), sdlog = as_array(params[[2]]$cpu()), log = FALSE)
     log_latent_pdf <- dlnorm(as_array(latent$cpu()), meanlog = as_array(params[[1]]$cpu()), sdlog = as_array(params[[2]]$cpu()), log = TRUE)
     log_actual_pdf <- dlnorm(as_array(actual$cpu()), meanlog = as_array(params[[1]]$cpu()), sdlog = as_array(params[[2]]$cpu()), log = TRUE)
+  }
+
+  if(distr == "skewed")
+  {
+    latent_pdf <- dsn(as_array(latent$cpu()), xi = as_array(params[[1]]$cpu()), omega = as_array(params[[2]]$cpu()), alpha = as_array(params[[3]]$cpu()), log = FALSE)
+    log_latent_pdf <- dsn(as_array(latent$cpu()), xi = as_array(params[[1]]$cpu()), omega = as_array(params[[2]]$cpu()), alpha = as_array(params[[3]]$cpu()), log = TRUE)
+    log_actual_pdf <- dsn(as_array(actual$cpu()), xi = as_array(params[[1]]$cpu()), omega = as_array(params[[2]]$cpu()), alpha = as_array(params[[3]]$cpu()), log = TRUE)
   }
 
   elbo <- abs(log_actual_pdf * latent_pdf - log_latent_pdf * latent_pdf)

@@ -19,3 +19,8 @@
 
 # proteus 1.1.3
 * Added option doing block validation in parallel. Improved numeric stability.
+
+# proteus 1.1.4
+* Solve issued about saturation of workers during parallelization. 
+* Fixed default parameters setting for stride.
+* Added skewed normal to the list of possible distribution.
